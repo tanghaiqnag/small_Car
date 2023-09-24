@@ -10,7 +10,47 @@
 #include "A72.h"
 #include "canp_hostcom.h"
 #include "HS_Rec_Data_Pro.H"
+#include "stm32f4xx.h"
+#include <stdbool.h>
+#include "infrared.h"
+#include "cba.h"
+#include "ultrasonic.h"
+#include "hard_can.h"
+#include "bh1750.h"
+#include "xiaochuang.h"
+#include "power_check.h"
+#include "can_user.h"
+#include "data_base.h"
+#include "roadway_check.h"
+#include "tba.h"
+#include "data_base.h"
+#include "swopt_drv.h"
+#include "uart_a72.h"
+#include "Can_check.h"
+#include "delay.h"
+#include "can_user.h"
+#include "Timer.h"
+#include "Rc522.h"
+#include "Mark_Fun.h"
+#include "Mylib.h"
+#include "Digital_track.h"
+#include "gpio.h"
+#include "Init_marker.h"
+#include "PID_Track.h"
+#include "Marker.h"
+#include "Typ.h"
+#include "string.h"
+#include "HS_Rec.h"
+#include "HS_Send.h"
+#include "crc24.h"
+#include <math.h>
 #include "Mark_To_MasterCar_DataSlove.h"
+#include "Bsp_init.h"
+RCC_ClocksTypeDef RCC_Clocks;
+uint32_t Power_check_times;      // 电量检测周期
+uint32_t WIFI_Upload_data_times; // 通过Wifi上传数据周期
+uint32_t RFID_Init_Check_times;
+uint32_t function_init_times; // 任务检测周期
 
 volatile uint32_t AotoFirstTime;
 volatile uint32_t WaitingTime;     //从车完成任务时间+20秒，需要开启自动启动路线
@@ -18,12 +58,12 @@ uint8_t StartAuto_Flag=0;
 
 uint8_t Task_Table_Data[10][30] = {0};//全部路线
 
+
 void Digital_Track_Init(void)
 {
 	static u8 Temp [] = {1,1,Code(2),TFTA(2),Gate(1),TrafficA(1),1,TFTB(1),TrafficB(4),4,
 												Code(4),TrafficC(3),3,Alarm(4),TrafficD(3),3,TFTC(4),1,1,2,2,4,'\0'};
-	static u8 Temp1[] = {1,Code(1),TFTA(1),TrafficA(1),TFTB(1),TrafficB(1),
-												Code(1),TrafficC(1),TrafficD(1),TFTC(1),1,1,3,'\0'};
+	static u8 Temp1[] = {1,1,1,3,'\0'};
   static u8 Temp2[] = {3,TrafficB(4),3,'\0'};
 	static u8 Temp3[] = {'\0'};
 	static u8 Temp4[] = {1,'\0'};
@@ -85,89 +125,14 @@ void Start_Digital_Track_Table(u8 Table_Num,bool Is_Init_Current,bool Is_RuKu_Fl
 	RuKu_Flag=Is_RuKu_Flag;
 	Auto_Run_Flag = true;
 }
-/*
-	函数指针数组替代'switch case'
-	使得程序更模块化更易于维护
-*/
-static uint8_t Task_Index = 0;//当前第几个任务
-static uint8_t Task_Number = 0;
-static uint8_t Init_Flag = true;
-static uint8_t Marker_Value = 0;
-uint8_t next_task()
-{
-	next = Task_Table[Task_Index+1];//读取下一个任务
-	Marker_Value = Task_Table[Task_Index+1] & 0x3F;//获取标志物数值
-	return  1;	
-}
-uint8_t change_direction()
-{
-	if (((next & 0x3F) >= Task_First_Dat) && ((next & 0x3F) < Special_Task_First_Dat)) 
-		{
-			next = ((next >> 6) & 0x03) + 1;		//获取方向
-		}
 
-		Change_Direction();			//改变方向
-
-	//更改模式(判断属于什么模式:是否前进、处理任务、前进、是否入库)
-
-	if (Task_Index == Task_Number) {//检测此任务是否为最后一个任务
-		
-		if (RuKu_Flag == true) {//任务完成是入库吗		
-			return  5;
-		}
-		
-		else {
-			return  4;//不用停车入库
-		}
-	}
-	else {
-		if (Marker_Value < 5) {
-			return  3; //是行驶
-		}
-		else {
-			return  2;
-		}
-	}
-}
-uint8_t process_task()
-{
-	Process_Task(Marker_Value);
-	return  6;
-}
-uint8_t go_track()
-{
-	track_PID(60);
-	go_forward(65, Mylib.go_value);
-	return 6;
-}
-uint8_t no_enter_garage()
-{
-	Auto_Run_Flag = false;
-	Init_Flag = true;
-}
-uint8_t enter_garage()
-{
-	uint8_t state=0;//车库相关数据初始化
-	printf_LCD((char *)"%d",Marker_InitStruct.Light.FirstGear);
-	Floor=(MO6%Marker_InitStruct.Light.FirstGear)+1;
-	printf_LCD((char *)"%d",Floor);
-	Garage_Track();					//倒车入库
-	delay_ms(200);
-	Finish_Task();					//关闭LED，开启无线充电
-	Auto_Run_Flag = false;
-	Init_Flag = true;
-}
-uint8_t task_ok()
-{
-	Task_Index += 1;	//完成子任务，子任务加1
-	printf_LCD("FinishTaskNum:%d\r\n",Task_Index);
-	return  0;
-}
-void Digital_Tracking(void)
-{
+void Digital_Tracking(void){//欲使用函数指针数组替代
+	
+	static uint8_t Init_Flag = true;
+	static uint8_t Task_Number = 0;
+	static uint8_t Task_Index = 0;//当前第几个任务
 	static uint8_t Mode = 0;
-	uint8_t (*p[7])() = {next_task,change_direction,process_task,
-	go_track,no_enter_garage,enter_garage,task_ok};
+	static uint8_t Marker_Value = 0;
 	if(Auto_Run_Flag == true)
 	{
 		if (Init_Flag == true) {    //判断初始化flag
@@ -176,127 +141,207 @@ void Digital_Tracking(void)
 			Task_Index = 0;
 			Mode = 0;
 		}
-		if(Mode >= 0 && Mode <= 6)
+		switch (Mode)
 		{
-			p[Mode]();
+			case 0:
+			{
+				next = Task_Table[Task_Index+1];//读取下一个任务
+				Marker_Value = Task_Table[Task_Index+1] & 0x3F;//获取标志物数值
+				Mode = 1;	
+			}
+			break;
+			case 1: 									//改变方向
+			{
+				if (((next & 0x3F) >= Task_First_Dat) && ((next & 0x3F) < Special_Task_First_Dat)) 
+					{
+						next = ((next >> 6) & 0x03) + 1;		//获取方向
+					}
+
+					Change_Direction();			//改变方向
+
+				//更改模式(判断属于什么模式:是否前进、处理任务、前进、是否入库)
+
+				if (Task_Index == Task_Number) {//检测此任务是否为最后一个任务
+					
+					if (RuKu_Flag == true) {//任务完成是入库吗		
+						Mode = 5;
+						break;
+					}
+					
+					else {
+						Mode = 4;//不用停车入库
+						break;
+					}
+				}
+				else {
+					if (Marker_Value < 5) {
+						Mode = 3; //是行驶
+					}
+					else {
+						Mode = 2;
+					}
+				}
+			
+			}		
+			break;
+			case 2://处理任务
+			{
+				Process_Task(Marker_Value);
+				Mode = 6;
+			}		
+			break;
+			case 3://行进
+			{
+				track_PID(60);
+				go_forward(65, Mylib.go_value);
+				Mode = 6;
+			}			
+			break;
+			case 4://非入库
+			{
+				Auto_Run_Flag = false;
+				Init_Flag = true;
+				
+				//StartAuto_Flag=1;
+ 			  //AotoFirstTime=gt_get();    /****打开自动开启路线****/
+
+			}			
+			break;
+			case 5://入库     
+			{
+				uint8_t state=0;//车库相关数据初始化
+				printf_LCD((char *)"%d",Marker_InitStruct.Light.FirstGear);
+				Floor=(MO6%Marker_InitStruct.Light.FirstGear)+1;
+				printf_LCD((char *)"%d",Floor);
+				
+				//Init_Garage();
+				//state = 1;
+				//state=Garage_Reduction();			//车库复位
+				//if(state)
+				//{
+					Garage_Track();							//倒车入库
+					delay_ms(200);
+					//Garage_Rise();							//车库上升
+				//}
+				Finish_Task();								//关闭LED，开启无线充电
+				Auto_Run_Flag = false;
+				Init_Flag = true;
+			}	
+			break;
+			case 6://完成了一个任务
+			{
+				Task_Index += 1;	//完成子任务，子任务加1
+				printf_LCD("FinishTaskNum:%d\r\n",Task_Index);
+				Mode = 0;			
+			}			
+			break;
+			default://非行进任务为最后一个任务	
+			{
+
+			}
+			break;
+			}
+	}
+}
+
+/**
+函数功能：按键检测
+参    数：无
+返 回 值：无
+*/
+
+void KEY_Check()
+{
+	if(S1 == 0)
+	{
+		delay_ms(10);
+		if(S1 == 0)
+		{
+			LED1 = !LED1;
+			while(!S1);
+			Init_Task();
+			Start_Digital_Track_Table(0,true,true);
+		}
+	}
+	if(S2 == 0)
+	{
+		delay_ms(10);
+		if(S2 == 0)
+		{
+			LED2 = !LED2;
+			while(!S2);
+			Start_Digital_Track_Table(1,true,false);
+		}
+	}
+
+	if(S3 == 0)
+	{
+		delay_ms(10);
+		if(S3 == 0)
+		{
+			LED3 = !LED3;
+			while(!S3);
+			Start_Digital_Track_Table(2,true,false);
+		}
+	}
+	if(S4 == 0)
+	{
+		delay_ms(10);
+		if(S4 == 0)
+		{
+			LED4 = !LED4;
+			while(!S4);
 		}
 	}
 }
-//void Digital_Tracking(void){//欲使用函数指针数组替代
-//	
-//	static uint8_t Init_Flag = true;
-//	static uint8_t Task_Number = 0;
-//	static uint8_t Task_Index = 0;//当前第几个任务
-//	static uint8_t Mode = 0;
-//	static uint8_t Marker_Value = 0;
-//	if(Auto_Run_Flag == true)
-//	{
-//		if (Init_Flag == true) {    //判断初始化flag
-//			Init_Flag = false;                   //保证初始化一次
-//			Task_Number = strlen((char*)Task_Table)-2;//任务数量
-//			Task_Index = 0;
-//			Mode = 0;
-//		}
-//		switch (Mode)
-//		{
-//			case 0:
-//			{
-//				next = Task_Table[Task_Index+1];//读取下一个任务
-//				Marker_Value = Task_Table[Task_Index+1] & 0x3F;//获取标志物数值
-//				Mode = 1;	
-//			}
-//			break;
-//			case 1: 									//改变方向
-//			{
-//				if (((next & 0x3F) >= Task_First_Dat) && ((next & 0x3F) < Special_Task_First_Dat)) 
-//					{
-//						next = ((next >> 6) & 0x03) + 1;		//获取方向
-//					}
+void Scheduler_run()
+{
+	
+	KEY_Check();// 按键任务执行
+	
+	Can_WifiRx_Check(); // wifi 数据接收检测
+	
+	if(gt_get_sub(RFID_Init_Check_times) == 0) // 检测rfid是否通信正常 若不正常则重复初始化 重复取反蜂鸣器，
+	{
+		static FlagStatus Is_ResetMP_Spk_Flag = RESET;
+		RFID_Init_Check_times = gt_get() + 200; // RFID初始化检测
+		if(Rc522_GetLinkFlag() == 0)                            // 判断与RC522是否通信成功
+		{
+			Readcard_daivce_Init();
+			MP_SPK = !MP_SPK; // 蜂鸣器取反
+			Is_ResetMP_Spk_Flag = SET;
+		}
+		else
+		{
+			if(Is_ResetMP_Spk_Flag == SET)
+			{
+				Is_ResetMP_Spk_Flag = RESET;
+				if(MP_SPK == 1)
+				{
+						MP_SPK = 0; // 假如检测到通信成功，就将蜂鸣器置0
+				}
+			}
+			LED4 = !LED4;
+			Rc522_LinkTest();
+		 }
+		}
+			if(gt_get_sub(Power_check_times) == 0){
+			Power_check_times = gt_get() + 200; // 电池电量检测
+			Power_Check();
+		}
 
-//					Change_Direction();			//改变方向
+		if(gt_get_sub(function_init_times) == 0){
+				function_init_times = gt_get() +  200;
+				Digital_Tracking(); // 任务启动
+		}
+		/*
+		主车无法接收到时从车发送的启动信号时，自动跑下一条路线
+		*/
+		if(StartAuto_Flag==1){
+			if(WaitingTime<((gt_get()-AotoFirstTime)/1000))
+			{
+				StartAuto_Flag=0;//路线:
+			}
+		}
 
-//				//更改模式(判断属于什么模式:是否前进、处理任务、前进、是否入库)
-
-//				if (Task_Index == Task_Number) {//检测此任务是否为最后一个任务
-//					
-//					if (RuKu_Flag == true) {//任务完成是入库吗		
-//						Mode = 5;
-//						break;
-//					}
-//					
-//					else {
-//						Mode = 4;//不用停车入库
-//						break;
-//					}
-//				}
-//				else {
-//					if (Marker_Value < 5) {
-//						Mode = 3; //是行驶
-//					}
-//					else {
-//						Mode = 2;
-//					}
-//				}
-//			
-//			}		
-//			break;
-//			case 2://处理任务
-//			{
-//				Process_Task(Marker_Value);
-//				Mode = 6;
-//			}		
-//			break;
-//			case 3://行进
-//			{
-//				track_PID(60);
-//				go_forward(65, Mylib.go_value);
-//				Mode = 6;
-//			}			
-//			break;
-//			case 4://非入库
-//			{
-//				Auto_Run_Flag = false;
-//				Init_Flag = true;
-//				
-//				//StartAuto_Flag=1;
-// 			  //AotoFirstTime=gt_get();    /****打开自动开启路线****/
-
-//			}			
-//			break;
-//			case 5://入库     
-//			{
-//				uint8_t state=0;//车库相关数据初始化
-//				printf_LCD((char *)"%d",Marker_InitStruct.Light.FirstGear);
-//				Floor=(MO6%Marker_InitStruct.Light.FirstGear)+1;
-//				printf_LCD((char *)"%d",Floor);
-//				
-//				//Init_Garage();
-//				//state = 1;
-//				//state=Garage_Reduction();			//车库复位
-//				//if(state)
-//				//{
-//					Garage_Track();							//倒车入库
-//					delay_ms(200);
-//					//Garage_Rise();							//车库上升
-//				//}
-//				Finish_Task();								//关闭LED，开启无线充电
-//				Auto_Run_Flag = false;
-//				Init_Flag = true;
-//			}	
-//			break;
-//			case 6://完成了一个任务
-//			{
-//				Task_Index += 1;	//完成子任务，子任务加1
-//				printf_LCD("FinishTaskNum:%d\r\n",Task_Index);
-//				Mode = 0;			
-//			}			
-//			break;
-//			default://非行进任务为最后一个任务	
-//			{
-
-//			}
-//			break;
-//			}
-//	}
-//}
-
+}
