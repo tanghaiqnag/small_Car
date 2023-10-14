@@ -46,7 +46,10 @@
 #include <math.h>
 #include "Mark_To_MasterCar_DataSlove.h"
 #include "Bsp_init.h"
+#include "quene.h"
+
 RCC_ClocksTypeDef RCC_Clocks;
+uint8_t  pNum_index = 0;				 //函数指针数组执行任务变量
 uint32_t Power_check_times;      // 电量检测周期
 uint32_t WIFI_Upload_data_times; // 通过Wifi上传数据周期
 uint32_t RFID_Init_Check_times;
@@ -125,34 +128,22 @@ void Start_Digital_Track_Table(u8 Table_Num,bool Is_Init_Current,bool Is_RuKu_Fl
 	RuKu_Flag=Is_RuKu_Flag;
 	Auto_Run_Flag = true;
 }
-
-void Digital_Tracking(void){//欲使用函数指针数组替代
-	
-	static uint8_t Init_Flag = true;
-	static uint8_t Task_Number = 0;
-	static uint8_t Task_Index = 0;//当前第几个任务
-	static uint8_t Mode = 0;
-	static uint8_t Marker_Value = 0;
-	if(Auto_Run_Flag == true)
-	{
-		if (Init_Flag == true) {    //判断初始化flag
-			Init_Flag = false;                   //保证初始化一次
-			Task_Number = strlen((char*)Task_Table)-2;//任务数量
-			Task_Index = 0;
-			Mode = 0;
-		}
-		switch (Mode)
-		{
-			case 0:
-			{
-				next = Task_Table[Task_Index+1];//读取下一个任务
-				Marker_Value = Task_Table[Task_Index+1] & 0x3F;//获取标志物数值
-				Mode = 1;	
-			}
-			break;
-			case 1: 									//改变方向
-			{
-				if (((next & 0x3F) >= Task_First_Dat) && ((next & 0x3F) < Special_Task_First_Dat)) 
+/******************************************/
+static uint8_t Init_Flag = true;
+static uint8_t Task_Number = 0;
+static uint8_t Task_Index = 0;//当前第几个任务
+static uint8_t Marker_Value = 0;
+//读取下一个任务
+void rTask_Next()
+{
+	next = Task_Table[Task_Index+1];//读取下一个任务
+	Marker_Value = Task_Table[Task_Index+1] & 0x3F;//获取标志物数值
+	pNum_index = 1;
+}
+//改变方向
+void CDirection()
+{
+	if (((next & 0x3F) >= Task_First_Dat) && ((next & 0x3F) < Special_Task_First_Dat)) 
 					{
 						next = ((next >> 6) & 0x03) + 1;		//获取方向
 					}
@@ -164,83 +155,86 @@ void Digital_Tracking(void){//欲使用函数指针数组替代
 				if (Task_Index == Task_Number) {//检测此任务是否为最后一个任务
 					
 					if (RuKu_Flag == true) {//任务完成是入库吗		
-						Mode = 5;
-						break;
+						pNum_index = 5;
 					}
 					
 					else {
-						Mode = 4;//不用停车入库
-						break;
+						pNum_index = 4;//不用停车入库
 					}
 				}
 				else {
 					if (Marker_Value < 5) {
-						Mode = 3; //是行驶
+						pNum_index = 3; //是行驶
 					}
 					else {
-						Mode = 2;
+						pNum_index = 2;
 					}
 				}
-			
-			}		
-			break;
-			case 2://处理任务
-			{
-				Process_Task(Marker_Value);
-				Mode = 6;
-			}		
-			break;
-			case 3://行进
-			{
-				track_PID(60);
-				go_forward(65, Mylib.go_value);
-				Mode = 6;
-			}			
-			break;
-			case 4://非入库
-			{
-				Auto_Run_Flag = false;
-				Init_Flag = true;
+}
+//处理任务
+void PTask()
+{
+		Process_Task(Marker_Value);
+		pNum_index = 6;
+}
+//行进
+void GForward()
+{
+	track_PID(60);
+	go_forward(65, Mylib.go_value);
+	pNum_index = 6;
+}
+//非入库
+void OFF_Garage()
+{
+	Auto_Run_Flag = false;
+	Init_Flag = true;
 				
-				//StartAuto_Flag=1;
- 			  //AotoFirstTime=gt_get();    /****打开自动开启路线****/
+	//StartAuto_Flag=1;
+	//AotoFirstTime=gt_get();    /****打开自动开启路线****/
+}
+//入库
+void ON_Garage()
+{
+	uint8_t state=0;//车库相关数据初始化
+	printf_LCD((char *)"%d",Marker_InitStruct.Light.FirstGear);
+	Floor=(MO6%Marker_InitStruct.Light.FirstGear)+1;
+	printf_LCD((char *)"%d",Floor);
 
-			}			
-			break;
-			case 5://入库     
-			{
-				uint8_t state=0;//车库相关数据初始化
-				printf_LCD((char *)"%d",Marker_InitStruct.Light.FirstGear);
-				Floor=(MO6%Marker_InitStruct.Light.FirstGear)+1;
-				printf_LCD((char *)"%d",Floor);
-				
-				//Init_Garage();
-				//state = 1;
-				//state=Garage_Reduction();			//车库复位
-				//if(state)
-				//{
-					Garage_Track();							//倒车入库
-					delay_ms(200);
-					//Garage_Rise();							//车库上升
-				//}
-				Finish_Task();								//关闭LED，开启无线充电
-				Auto_Run_Flag = false;
-				Init_Flag = true;
-			}	
-			break;
-			case 6://完成了一个任务
-			{
-				Task_Index += 1;	//完成子任务，子任务加1
-				printf_LCD("FinishTaskNum:%d\r\n",Task_Index);
-				Mode = 0;			
-			}			
-			break;
-			default://非行进任务为最后一个任务	
-			{
-
-			}
-			break;
-			}
+	//Init_Garage();
+	//state = 1;
+	//state=Garage_Reduction();			//车库复位
+	//if(state)
+	//{
+		Garage_Track();							//倒车入库
+		delay_ms(200);
+		//Garage_Rise();							//车库上升
+	//}
+	Finish_Task();								//关闭LED，开启无线充电
+	Auto_Run_Flag = false;
+	Init_Flag = true;
+}
+//完成一个任务
+void OK_Task()
+{
+	Task_Index += 1;	//完成子任务，子任务加1
+	printf_LCD("FinishTaskNum:%d\r\n",Task_Index);
+	pNum_index = 0;			
+}
+void Digital_Tracking(void){
+	
+  void (*pArr[])() = {rTask_Next,CDirection,PTask,GForward,OFF_Garage,ON_Garage,OK_Task};
+	if(Auto_Run_Flag == true)
+	{
+		if (Init_Flag == true) {    	//判断初始化flag
+			Init_Flag = false;                   //保证初始化一次
+			Task_Number = strlen((char*)Task_Table)-2;//任务数量
+			Task_Index = 0;
+			pNum_index = 0;
+		}
+		for(int i = 0; i < 8; i++){
+			pArr[pNum_index]();
+		}
 	}
 }
 
@@ -259,8 +253,13 @@ void KEY_Check()
 		{
 			LED1 = !LED1;
 			while(!S1);
-			Init_Task();
-			Start_Digital_Track_Table(0,true,true);
+		//Init_Task();
+			ring rt_buff = fifo_init();
+			ring_buff_insert(rt_buff,'K');
+			uint8_t ring_num[] = {ring_buff_get(rt_buff)};
+			char Debug_Temp[] = "OK";
+			Send_InfoData_To_Fifo((u8 *)ring_num,strlen(ring_num));
+			ring_buff_destory(rt_buff);
 		}
 	}
 	if(S2 == 0)
@@ -299,7 +298,7 @@ void Scheduler_run()
 	
 	KEY_Check();// 按键任务执行
 	
-	Can_WifiRx_Check(); // wifi 数据接收检测
+	Can_WifiRx_Check(); // wifi数据接收检测
 	
 	if(gt_get_sub(RFID_Init_Check_times) == 0) // 检测rfid是否通信正常 若不正常则重复初始化 重复取反蜂鸣器，
 	{
